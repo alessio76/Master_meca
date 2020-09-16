@@ -520,9 +520,9 @@ void slaveinfo(char *ifname)
       /* find and auto-config slaves */
       if ( ec_config(FALSE,&IOmap) > 0 )
       {  
-          /*ec_slave[0].state = EC_STATE_PRE_OP;
-		 ec_writestate (0); 
-         ec_statecheck(0, EC_STATE_PRE_OP,  2000000);*/
+         ec_slave[0].state = EC_STATE_PRE_OP;
+		 ec_writestate (0);
+         ec_statecheck(0, EC_STATE_PRE_OP,  2000000);
 
          ec_configdc();
          //ec_config_map(&IOmap);
@@ -531,14 +531,12 @@ void slaveinfo(char *ifname)
          expectedWKC = (ec_group[0].outputsWKC * 2) + ec_group[0].inputsWKC;
          printf("Calculated workcounter %d\n", expectedWKC);
 
-        
-         
-		ec_slave[0].state = EC_STATE_SAFE_OP;
+         ec_slave[0].state = EC_STATE_SAFE_OP;
 		 ec_writestate (0);
 		 
 
          // wait for all slaves to reach SAFE_OP state 
-         ec_statecheck(0, EC_STATE_SAFE_OP,  9000000);
+         ec_statecheck(0, EC_STATE_SAFE_OP,9000000);
          if (ec_slave[0].state != EC_STATE_SAFE_OP )
          {
             printf("Not all slaves reached safe operational state.\n");

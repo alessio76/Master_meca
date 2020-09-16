@@ -1,5 +1,5 @@
 //IP MECA 192.168.2.103
-
+//tempo di ciclo garantito 2ms, minimo 1ms
 #include <sys/mman.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +21,7 @@
 #define EC_TIMEOUT_SDO_CYCLE 100000 //tempo di ritorno del frame ethercat
 #define EC_TIMEOUT_SDO_RESPONSE 2000000 //tempo di risposta del singolo slave
 #define NSEC_PER_SEC 1000000000 //nanosecondi ogni secondo
+#define CYCLE_TIME 1000000 //ciclo in ns
 
 #define stack8k (8 * 1024)
 
@@ -36,6 +37,8 @@ boolean needlf;
 volatile int wkc;
 boolean inOP;
 uint8 currentgroup = 0;
+int shutdown=0;
+int j=0;
 
 //struttura che rappresenta le entry dell'Object Dictionary
 typedef struct 
@@ -46,6 +49,36 @@ typedef struct
         int value;
       
 } OBentry;
+
+//struttura che rappresenta gli ingressi dell'MECA500 (Rx)
+typedef struct PACKED
+{		
+	    uint32 robot_control;
+       uint32 motion_control;
+       uint32 motion_command;
+       float var1;
+       float var2;
+       float var3;
+       float var4;
+       float var5;
+       float var6; 
+      
+} out_MECA500t;
+
+out_MECA500t  * out_MECA500;
+
+//struttura che rappresenta le uscite dell'MECA500
+/*typedef struct PACKED
+{
+        int32 position_actual_value;
+        int32 velocity_actual_value;
+        int16 torque_actual_value;
+        uint16 statusword;
+        int32 current_actual_value;
+        
+} in_MECA500t;
+
+in_MECA500t * in_MECA500;*/
 
 //SM2 master->slave
 //SM3 slave->master
@@ -59,6 +92,7 @@ retval=ec_SDOread(slave, TXPDO_number.index,TXPDO_number.sub_index, FALSE,
 &(TXPDO_number.size), &(TXPDO_number.value), EC_TIMEOUTSAFE);
  printf("sub_index=%d,value=%d,esito=%d\n",TXPDO_number.sub_index,TXPDO_number.value,retval);
 */
+printf("---DATI DA SCRIVERE---");
 retval=ec_SDOwrite(slave, TXPDO_number.index,TXPDO_number.sub_index, 
 FALSE, TXPDO_number.size, &(TXPDO_number.value), EC_TIMEOUTSAFE);
 printf("sub_index=%d,value=%x,esito=%d\n\n",TXPDO_number.sub_index,TXPDO_number.value,
@@ -102,6 +136,7 @@ FALSE, TXPDO_number.size, &(TXPDO_number.value), EC_TIMEOUTSAFE);
 printf("esito_numero=%d\n",retval);
 
 //controllo che siano memorizzati i dati corretti
+printf("---DATI LETTI---");
 for(int i=0x1; i<=TXPDO_number.value; i++){
  retval=ec_SDOread(slave, TXPDO.index,i, FALSE, &(TXPDO.size), 
  &(TXPDO.value), EC_TIMEOUTSAFE);
@@ -123,6 +158,7 @@ while(RXPDO.value<=0x1602){
 retval=ec_SDOwrite(slave, RXPDO_number.index,RXPDO_number.sub_index, 
 FALSE, RXPDO_number.size, &(RXPDO_number.value), EC_TIMEOUTSAFE);
 printf("esito_numero=%d\n",retval);
+ec_dcsync0(MECA500,TRUE,CYCLE_TIME,CYCLE_TIME/2);
 
 return 0;
 }
@@ -156,6 +192,44 @@ void ec_sync(int64 reftime, int64 cycletime , int64 *offsettime){
    gl_delta = delta;
 }
 
+OSAL_THREAD_FUNC ecatthread(){
+   struct timespec ts, tleft;
+   int ht;
+   int64 cycletime;
+   struct sched_attr attr;
+   attr.size=sizeof(attr);
+   sched_fifo(&attr,40,0);
+   printf("Start real time thread\n");
+   clock_gettime(CLOCK_MONOTONIC, &ts);
+   ht = (ts.tv_nsec / 1000000) + 1; /* round to nearest ms */
+   ts.tv_nsec = ht * 1000000;
+   cycletime = CYCLE_TIME; /* cycletime in ns */
+   toff = 0;
+   //dorun = 0;
+    /* eseguo il pinning della pagine attuali e future occupate dal thread per garantire
+        prevedibilità nelle prestazioni real-time */
+   if(mlockall(MCL_CURRENT|MCL_FUTURE) == -1){
+         printf("mlockall failed: %m\n");
+         pthread_cancel(pthread_self());
+        }
+        
+    ec_send_processdata();
+   
+	for(int j=0;j<5000;j++){
+      time1=ec_DCtime;
+	   add_timespec(&ts, cycletime + toff);
+      clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, &tleft);
+	   wkc=ec_receive_processdata(EC_TIMEOUTRET);
+	   ec_sync(ec_DCtime, cycletime, &toff);
+      ec_send_processdata();
+      time2=ec_DCtime;
+      cycle=time2-time1;
+	   }
+
+      shutdown=1;
+}
+
+
 OSAL_THREAD_FUNC MECA_test(char *ifname){
    int cnt;
    
@@ -169,7 +243,7 @@ OSAL_THREAD_FUNC MECA_test(char *ifname){
       if ( ec_config_init(FALSE) > 0 )
       {
          printf("%d slaves found and configured.\n",ec_slavecount);
-        
+         //ec_slave[MECA500].blockLRW=1;
 		   ec_slave[0].state = EC_STATE_PRE_OP;
 		   ec_writestate(0);
 		   ec_statecheck(0, EC_STATE_PRE_OP, EC_TIMEOUT_INIT_TO_PRE_OP);
@@ -184,10 +258,10 @@ OSAL_THREAD_FUNC MECA_test(char *ifname){
          ec_configdc();
          //mappa i PDO mappati precedentemente nel buffer locale
          ec_config_map(&IOmap);
-        
-       //out_MECA500 = (out_MECA500t*) ec_slave[1].outputs; //output del master
-       //in_MECA500 = (in_MECA500t*) ec_slave[1].inputs;  //input del master
          
+       out_MECA500 = (out_MECA500t*) ec_slave[MECA500].outputs; //output del master
+       //in_MECA500 = (in_MECA500t*) ec_slave[1].inputs;  //input del master
+        
          //legge e conserva lo stato nel vettore ec_slave[]
          ec_readstate();
          for(cnt = 1; cnt <= ec_slavecount ; cnt++)
@@ -203,7 +277,7 @@ OSAL_THREAD_FUNC MECA_test(char *ifname){
          ec_slave[0].state = EC_STATE_SAFE_OP;
 		   ec_writestate(0);
 		   ec_statecheck(0, EC_STATE_SAFE_OP, EC_TIMEOUT_TO_SAFE_OP);
-
+         
          ec_readstate();
          for(cnt = 1; cnt <= ec_slavecount ; cnt++)
          {
@@ -211,29 +285,29 @@ OSAL_THREAD_FUNC MECA_test(char *ifname){
                   cnt, ec_slave[cnt].name, ec_slave[cnt].Obits, ec_slave[cnt].Ibits,
                   ec_slave[cnt].state, (int)ec_slave[cnt].pdelay, ec_slave[cnt].hasdc);
           }
-         /*
          printf("Request operational state for all slaves\n");
          ec_slave[0].state = EC_STATE_OPERATIONAL;
          ec_writestate(0);
          //aspetta che tutti raggiungano OPERATIONAL
+         osal_thread_create(&thread1, stack8k * 2, &ecatthread, NULL);
          ec_statecheck(0, EC_STATE_OPERATIONAL,  EC_TIMEOUT_TO_SAFE_OP);
          //crea il thread real-time per lo scambio dati
-         //osal_thread_create(&thread1, stack8k * 2, &ecatthread, NULL);
-          //dorun = 1;
+         //dorun = 1;
          
          if (ec_slave[0].state == EC_STATE_OPERATIONAL)
          {
             printf("Operational state reached for all slaves.Actual state=%d\n",ec_slave[0].state);
             inOP = TRUE;
            //ciclo per stampare i dati in tempo reale
-            while(shutdown)
-            {
-               printf("PDO n.i=%d,target_position=%d,cycle1=%ld,cycle2=%d \n",
-                  i,out_MECA500->target_position+out_MECA500->position_offset,cycle,ec_slave[1].DCcycle);
-                  
+            while(!shutdown)
+            {   
+               printf("PDO n.i=%d,robot_control=%u,motion_control=%u,calc_cycle=%ld[ns],cycle_read=%ld[ns] \n",
+                  j,out_MECA500->robot_control,out_MECA500->motion_control,
+                  cycle,ec_slave[1].DCcycle);
+               /*   
                printf("statusword %4x,controlword %x, position_actual_value %d",
                in_MECA500->statusword,out_MECA500->controlword,in_MECA500->position_actual_value);
-               
+               */
                fflush(stdout);
                osal_usleep(1000);
             }
@@ -252,7 +326,7 @@ OSAL_THREAD_FUNC MECA_test(char *ifname){
                          j, ec_slave[j].state, ec_slave[j].ALstatuscode, ec_ALstatuscode2string(ec_slave[j].ALstatuscode));
                  }
              }
-         }*/
+         }
       }
       else
       {
@@ -262,8 +336,8 @@ OSAL_THREAD_FUNC MECA_test(char *ifname){
       
       /*ec_slave[0].state = EC_STATE_INIT;
 	   ec_writestate(0);
-	   ec_statecheck(0, EC_STATE_INIT, EC_TIMEOUT_TO_SAFE_OP);
-      ec_close();*/
+	   ec_statecheck(0, EC_STATE_INIT, EC_TIMEOUT_TO_SAFE_OP);*/
+      ec_close();
    }
    else
    {
